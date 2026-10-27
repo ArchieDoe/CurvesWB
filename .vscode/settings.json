@@ -1,0 +1,10 @@
+{
+    "python.analysis.extraPaths": [
+        "C:/Program Files/FreeCAD 1.1/Mod",
+        "C:/Program Files/FreeCAD 1.1/Ext",
+        "C:/Program Files/FreeCAD 1.1/bin/Lib/site-packages",
+    ],
+    "python.analysis.useLibraryCodeForTypes": true,
+    "python.analysis.diagnosticMode": "workspace",
+    "python.analysis.typeCheckingMode": "standard"
+}

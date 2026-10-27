@@ -98,13 +98,13 @@ class MarkerOnShape(graphics.Marker):
             if t.Length > 1e-7:
                 self._tangent = t
                 self._tangent.normalize()
-                self.marker.markerIndex = coin.SoMarkerSet.DIAMOND_FILLED_9_9
+                self.marker.markerIndex = coin.SoMarkerSet.CIRCLE_FILLED_5_5
             else:
                 self._tangent = None
-                self.marker.markerIndex = coin.SoMarkerSet.CIRCLE_FILLED_9_9
+                self.marker.markerIndex = coin.SoMarkerSet.CIRCLE_FILLED_5_5
         else:
             self._tangent = None
-            self.marker.markerIndex = coin.SoMarkerSet.CIRCLE_FILLED_9_9
+            self.marker.markerIndex = coin.SoMarkerSet.CIRCLE_FILLED_5_5
 
     @property
     def snap_shape(self):
@@ -263,7 +263,11 @@ class InterpoCurveEditor(object):
 
     def setup_InteractionSeparator(self):
         if self.root_inserted:
-            self.sg.removeChild(self.root)
+            self.quit()
+
+        # self.eventsNode = coin.SoEventCallback();
+        # self.sg.insertChild(self.eventsNode, 0)
+
         self.root = graphics.InteractionSeparator(self.rm)
         self.root.setName("InteractionSeparator")
         # self.root.ovr_col = "yellow"
@@ -350,7 +354,6 @@ class InterpoCurveEditor(object):
     def controlCB(self, attr, event_callback):
         event = event_callback.getEvent()
         if event.getState() == event.UP:
-            # FreeCAD.Console.PrintMessage("Key pressed : %s\n"%event.getKey())
             if event.getKey() == ord("i"):
                 self.subdivide()
             elif event.getKey() == ord("p"):
@@ -513,12 +516,18 @@ class InterpoCurveEditor(object):
         return(True)
 
     def quit(self):
-        self.root.events.removeEventCallback(coin.SoKeyboardEvent.getClassTypeId(), self._controlCB)
-        self.root.unregister()
-        # self.root.removeAllChildren()
+        self.clearCallbacks()
         self.sg.removeChild(self.root)
         self.root_inserted = False
 
+    def clearCallbacks(self):
+        self.root.unregister()
+        self.root.events.removeEventCallback(coin.SoKeyboardEvent.getClassTypeId(), self._controlCB)
+        
+        # self.sg.removeChild(self.eventsNode)
+        
+        
+        
 
 def get_guide_params():
     sel = FreeCADGui.Selection.getSelectionEx()

@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
+import FreeCAD
 from pivy import coin
+from collections.abc import Iterable
+from enum import IntEnum
 
 #from pivy.utils import getPointOnScreen
 
@@ -53,6 +56,7 @@ COLORS = {
     "magenta":(1., 0., 1.)
 }
 
+#region GeneralEntities
 class Object3D(coin.SoSeparator):
     std_col = "black"
     ovr_col = "red"
@@ -126,17 +130,16 @@ class Object3D(coin.SoSeparator):
             for foo in self.on_drag:
                 foo()
 
-    def drag_release(self):
-        if self.enabled:
-            for foo in self.on_drag_release:
-                foo()
-
-    def drag_start(self):
+    def onDragStart(self):
         self._tmp_points = self.points
         if self.enabled:
             for foo in self.on_drag_start:
                 foo()
 
+    def onDragEnd(self):
+        if self.enabled:
+            for foo in self.on_drag_release:
+                foo()
     @property
     def drag_objects(self):
         if self.enabled:
@@ -149,22 +152,17 @@ class Object3D(coin.SoSeparator):
     def check_dependency(self):
         pass
 
-
 class Marker(Object3D):
     def __init__(self, points, dynamic=False):
         super(Marker, self).__init__(points, dynamic)
-        self.drawstyle = coin.SoDrawStyle()
-        self.drawstyle.pointSize = 30.0
-        self.point = coin.SoPointSet()
-        self.addChild(self.drawstyle)
-        self.addChild(self.point)
-
+        self.marker = coin.SoMarkerSet()
+        self.marker.markerIndex = coin.SoMarkerSet.CIRCLE_FILLED_9_9
+        self.addChild(self.marker)
 
 class Line(Object3D):
     def __init__(self, points, dynamic=False):
         super(Line, self).__init__(points, dynamic)
         self.drawstyle = coin.SoDrawStyle()
-        self.drawstyle.lineWidth = 5.0
         self.line = coin.SoLineSet()
         self.addChild(self.drawstyle)
         self.addChild(self.line)
@@ -209,6 +207,30 @@ class Arrow(Line):
         _rot = coin.SbRotation()
         _rot.setValue(coin.SbVec3f(0, 1, 0), coin.SbVec3f(*direction))
         self.arrow_rot.rotation.setValue(_rot)
+#endregion
+
+MAIN_ACTION_BUTTON = coin.SoMouseButtonEvent.BUTTON1
+
+
+CONSTRAIN_X = "constraint_x"
+CONSTRAIN_Y = "constraint_y"
+CONSTRAIN_Z = "constraint_z"
+CONSTRAIN_MODE = "constrain_mode"
+INVERT_CONSTRAIN = "invert_constrain"
+
+
+class Axis(IntEnum):
+    X = 0
+    Y = 1
+    Z = 2
+
+BUTTONS = {
+    CONSTRAIN_X: ord("x"),
+    CONSTRAIN_Y: ord("y"),
+    CONSTRAIN_Z: ord("z"),
+    INVERT_CONSTRAIN: coin.SoKeyboardEvent.LEFT_CONTROL,
+    CONSTRAIN_MODE: coin.SoKeyboardEvent.LEFT_SHIFT,
+}
 
 class InteractionSeparator(coin.SoSeparator):
     pick_radius = 20
@@ -223,64 +245,264 @@ class InteractionSeparator(coin.SoSeparator):
     def __init__(self, render_manager):
         super(InteractionSeparator, self).__init__()
         self.render_manager = render_manager
-        self.lines_objects = coin.SoSeparator()  # Render lines first
-        self.marker_objects = coin.SoSeparator()  # Render markers on top
+        self.objects = coin.SoSeparator()
         self.dynamic_objects = []
         self.static_objects = []
-        self.marker_objects_list = []  # Track markers separately
-        self.over_object = None
+
         self.selected_objects = []
-        self.drag_objects = []
+        
+        # self.lines_objects = coin.SoSeparator()  # Render lines first
+        # self.marker_objects = coin.SoSeparator()  # Render markers on top
+
+        # self.marker_objects_list = []  # Track markers separately
+        # self.over_object = None
+        # self.drag_objects = []
 
         self.on_drag = []
         self.on_drag_release = []
         self.on_drag_start = []
 
-        self._direction = None
+        self.is_mouse_action_button_pressed = False
+
+
+        self.is_drag_in_progress = False
+
+
+        self.is_frame_selecting = False
+        self.mouse_action_start_pos = None
+        self.previous_cursor_pos = None
+
+        self.constrained_directions = {
+            Axis.X: False,
+            Axis.Y: False,
+            Axis.Z: False,
+        }
+
+        self.constrain_inverted = False
+        self.constrain_mode = False
 
         self.events = coin.SoEventCallback()
-        self += self.events, self.lines_objects, self.marker_objects
+        self += self.events, self.objects
+
+    def addChild(self, node):
+        if hasattr(node, "dynamic"):
+            self.objects.addChild(node)
+            if node.dynamic:
+                self.dynamic_objects.append(node)
+            else:
+                self.static_objects.append(node)
+        else:
+            super(InteractionSeparator, self).addChild(node)  
 
     def register(self):
-        self._highlightCB = self.events.addEventCallback(
-            coin.SoLocation2Event.getClassTypeId(), self.highlightCB)
-        self._selectCB = self.events.addEventCallback(
-            coin.SoMouseButtonEvent.getClassTypeId(), self.selectCB)
-        self._grabCB = self.events.addEventCallback(
-            coin.SoMouseButtonEvent.getClassTypeId(), self.grabCB)
-        self._deleteCB = self.events.addEventCallback(
-            coin.SoKeyboardEvent.getClassTypeId(), self.deleteCB)
-        self._selectAllCB = self.events.addEventCallback(
-            coin.SoKeyboardEvent.getClassTypeId(), self.selectAllCB)
+        self.mouseButtonCB = self.events.addEventCallback(
+            coin.SoMouseButtonEvent.getClassTypeId(), self.onMouseButtonAction
+        )
+        self.mouseMoveCB = self.events.addEventCallback(
+            coin.SoLocation2Event.getClassTypeId(), self.onMouseMove
+        )
+        self.keyboardAction = self.events.addEventCallback(
+            coin.SoKeyboardEvent .getClassTypeId(), self.onKeyboardAction
+        )
 
     def unregister(self):
         self.events.removeEventCallback(
-            coin.SoLocation2Event.getClassTypeId(), self._highlightCB)
+            coin.SoMouseButtonEvent.getClassTypeId(), self.mouseButtonCB
+        )
         self.events.removeEventCallback(
-            coin.SoMouseButtonEvent.getClassTypeId(), self._selectCB)
+            coin.SoLocation2Event.getClassTypeId(), self.mouseMoveCB
+        )
         self.events.removeEventCallback(
-            coin.SoMouseButtonEvent.getClassTypeId(), self._grabCB)
-        self.events.removeEventCallback(
-            coin.SoKeyboardEvent.getClassTypeId(), self._deleteCB)
-        self.events.removeEventCallback(
-            coin.SoKeyboardEvent.getClassTypeId(), self._selectAllCB)
+            coin.SoKeyboardEvent .getClassTypeId(), self.keyboardAction
+        )
+
+    def onMouseButtonAction(self, attr, event_callback):
+        event = event_callback.getEvent()
+        if (
+            event.getState() == coin.SoMouseButtonEvent.DOWN and
+            event.getButton() == MAIN_ACTION_BUTTON
+        ):
+            self.events.grabEvents()
+            # There are 3 cases that we want to cover.
+            # Case 1: There's nothing under the cursor. We consider this as if user is trying to select something in rectangle are.
+            # Case 2: There's an element from our objects collection. The elements being selected. Then:
+            # Case 2a: User releases the button on the same position. We interpret this as just a select event.
+            # Case 2b: User moves the mouse while the button is pressed. We interpret this as a draggin event.
+            self.mouse_action_start_pos = self.cursor_pos(event)
+            pos = event.getPosition()
+            self.is_mouse_action_button_pressed = True
+            obj = self.find_object_under_position(pos)
+            self.selectObject(obj)
+            event_callback.setHandled()
+
+        if (
+            event.getState() == coin.SoMouseButtonEvent.UP and
+            event.getButton() == MAIN_ACTION_BUTTON
+        ):
+            
+            self.events.releaseEvents()
+            FreeCAD.Console.PrintMessage("Up registereds \n")
+            self.is_mouse_action_button_pressed = False
+            self.endDrag()
+            event_callback.setHandled()
+
+        
+    def onMouseMove(self, attr, event_callback):
+        
+        event = event_callback.getEvent()
+        current_pos = self.cursor_pos(event)
+
+        if (
+            self.is_mouse_action_button_pressed and 
+            len(self.selected_objects) != 0
+        ): 
+            if (not self.is_drag_in_progress):
+                self.startDrag()
+            
+            # Dragging in progress
+            diff = current_pos - self.mouse_action_start_pos
+            diff = self.constrained_vector(diff)
+            for obj in self.selected_objects:
+                obj.drag(diff, 1)
+            for foo in self.on_drag:
+                foo()
 
 
-    def addChild(self, child):
-        if hasattr(child, "dynamic"):
-            # Add markers to marker_objects (rendered on top, picked first)
-            if isinstance(child, Marker):
-                self.marker_objects.addChild(child)
-                self.marker_objects_list.append(child)
+        self.previous_cursor_pos = current_pos
+
+    def onKeyboardAction(self, attr, event_callback):
+        event = event_callback.getEvent()
+        key = event.getKey()
+        if (
+            event.getState() == coin.SoKeyboardEvent.DOWN 
+        ):
+            if key == BUTTONS[CONSTRAIN_X]:
+                self.constrained_directions[Axis.X] = True
+            elif key == BUTTONS[CONSTRAIN_Y]:
+                self.constrained_directions[Axis.Y] = True
+            elif key == BUTTONS[CONSTRAIN_Z]:
+                self.constrained_directions[Axis.Z] = True
+            elif key == BUTTONS[INVERT_CONSTRAIN]:
+                self.constrain_inverted = True
+            elif key == BUTTONS[CONSTRAIN_MODE]:
+                self.constrain_mode = True
+
+        if (
+            event.getState() == coin.SoKeyboardEvent.UP 
+        ):
+            if key == BUTTONS[CONSTRAIN_X]:
+                self.constrained_directions[Axis.X] = False
+            elif key == BUTTONS[CONSTRAIN_Y]:
+                self.constrained_directions[Axis.Y] = False
+            elif key == BUTTONS[CONSTRAIN_Z]:
+                self.constrained_directions[Axis.Z] = False
+            elif key == BUTTONS[INVERT_CONSTRAIN]:
+                self.constrain_inverted = False
+            elif key == BUTTONS[CONSTRAIN_MODE]:
+                self.constrain_mode = False
+                
+
+    def startDrag(self):
+        if self.is_drag_in_progress:
+            return
+
+        self.is_drag_in_progress = True
+
+        self.constrained_directions = {
+            Axis.X: False,
+            Axis.Y: False,
+            Axis.Z: False,
+        }
+
+        self.constrain_inverted = False
+        self.constrain_mode = False
+
+        for obj in self.selected_objects:
+            obj.onDragStart()
+
+    def endDrag(self):
+        if not self.is_drag_in_progress:
+            return
+
+        self.is_drag_in_progress = False
+        
+        for obj in self.selected_objects:
+            obj.onDragEnd()
+
+    def find_object_under_position(self, mouse_pos):
+        ray_pick = coin.SoRayPickAction(self.render_manager.getViewportRegion())
+        ray_pick.setPoint(coin.SbVec2s(*mouse_pos))
+        ray_pick.setRadius(InteractionSeparator.pick_radius)
+        ray_pick.setPickAll(True)
+        ray_pick.apply(self.render_manager.getSceneGraph())
+        picked_points = ray_pick.getPickedPointList()
+        return self.find_stored_objects_intersecting_ray(picked_points)
+
+    def find_stored_objects_intersecting_ray(self, points):
+        found_other_object = None
+
+        for intersection_point in points:
+            path = intersection_point.getPath()
+            length = path.getLength()
+            intersected_node = path.getNode(length - 2)
+
+            for stored_node in self.dynamic_objects:
+                if intersected_node == stored_node:
+                    # Marker always have a priority (as it is harder to grab)
+                    if isinstance(stored_node, Marker):
+                        return stored_node;
+                    else:
+                        found_other_object = stored_node
+                    
+        return found_other_object
+
+    def selectObject(self, obj, multi = False):
+        if not multi:
+            for o in self.selected_objects:
+                o.unselect()
+            self.selected_objects = []
+        if obj:
+            if obj in self.selected_objects:
+                self.selected_objects.remove(obj)
             else:
-                # Add other objects to lines_objects
-                self.lines_objects.addChild(child)
-            if child.dynamic:
-                self.dynamic_objects.append(child)
-            else:
-                self.static_objects.append(child)
-        else:
-            super(InteractionSeparator, self).addChild(child)  
+                self.selected_objects.append(obj)
+        self.colorSelected()
+        self.selectionChanged()
+
+    def constrained_vector(self, vector):
+        if (
+            not self.constrain_mode
+        ):
+            return vector
+
+        if (
+            not self.constrained_directions[Axis.X] and
+            not self.constrained_directions[Axis.Y] and
+            not self.constrained_directions[Axis.Z]
+        ):
+            return vector
+
+        mask = {
+            Axis.X: 1 if self.constrained_directions[Axis.X] and not self.constrain_inverted else 0,
+            Axis.Y: 1 if self.constrained_directions[Axis.Y] and not self.constrain_inverted else 0,
+            Axis.Z: 1 if self.constrained_directions[Axis.Z] and not self.constrain_inverted else 0,
+        }
+
+        return [
+            vector[Axis.X] * mask[Axis.X],
+            vector[Axis.Y] * mask[Axis.Y],
+            vector[Axis.Z] * mask[Axis.Z],
+        ]
+
+        return vector
+        # if self._direction == InteractionSeparator.ctrl_keys["axis_x"]:
+        #     return [vector[0], 0, 0]
+        # elif self._direction == InteractionSeparator.ctrl_keys["axis_y"]:
+        #     return [0, vector[1], 0]
+        # elif self._direction == InteractionSeparator.ctrl_keys["axis_z"]:
+        #     return [0, 0, vector[2]]
+
+
 
 #-----------------------HIGHLIGHTING-----------------------#
 # a SoLocation2Event calling a function which sends rays   #
@@ -295,65 +517,20 @@ class InteractionSeparator(coin.SoSeparator):
             self.over_object.set_mouse_over()
         self.colorSelected()
 
-    def highlightCB(self, attr, event_callback):
-        event = event_callback.getEvent()
-        pos = event.getPosition()
-        obj = self.sendRay(pos)
-        self.highlightObject(obj)
+    # def highlightCB(self, attr, event_callback):
+    #     event = event_callback.getEvent()
+    #     pos = event.getPosition()
+    #     obj = self.sendRay(pos)
+    #     self.highlightObject(obj)
 
-    def sendRay(self, mouse_pos):
-        """sends a ray through the scene and return the nearest entity"""
-        ray_pick = coin.SoRayPickAction(self.render_manager.getViewportRegion())
-        ray_pick.setPoint(coin.SbVec2s(*mouse_pos))
-        ray_pick.setRadius(InteractionSeparator.pick_radius)
-        ray_pick.setPickAll(True)
-        ray_pick.apply(self.render_manager.getSceneGraph())
-        picked_point = ray_pick.getPickedPointList()
-        return self.objByID(picked_point)
 
-    def objByID(self, picked_point):
-        # First pass: check only markers (vertices) - highest priority
-        for point in picked_point:
-            path = point.getPath()
-            length = path.getLength()
-            node = path.getNode(length - 2)
-            for o in self.marker_objects_list:
-                if node == o:
-                    return(o)
-        
-        # Second pass: check all other objects
-        for point in picked_point:
-            path = point.getPath()
-            length = path.getLength()
-            node = path.getNode(length - 2)
-            for o in self.dynamic_objects:
-                if node == o:
-                    return(o)
-        return None
+
+
         
 
 
 #------------------------SELECTION------------------------#
-    def selectObject(self, obj, multi=False):
-        if not multi:
-            for o in self.selected_objects:
-                o.unselect()
-            self.selected_objects = []
-        if obj:
-            if obj in self.selected_objects:
-                self.selected_objects.remove(obj)
-            else:
-                self.selected_objects.append(obj)
-        self.colorSelected()
-        self.selectionChanged()
-
-    def selectCB(self, attr, event_callback):
-        event = event_callback.getEvent()
-        if (event.getState() == coin.SoMouseButtonEvent.DOWN and
-                event.getButton() == event.BUTTON1):
-            pos = event.getPosition()
-            obj = self.sendRay(pos)
-            self.selectObject(obj, event.wasCtrlDown())
+    
 
     def select_all_cb(self, event_callback):
         event = event_callback.getEvent()
@@ -364,7 +541,7 @@ class InteractionSeparator(coin.SoSeparator):
                         o.unselect()
                     self.selected_objects = []
                 else:
-                    for obj in self.dynamic_objects:
+                    for obj in self.objects:
                         if obj.dynamic:
                             self.selected_objects.append(obj)
                 self.ColorSelected()
@@ -383,20 +560,20 @@ class InteractionSeparator(coin.SoSeparator):
     def selectionChanged(self):
         pass
 
-    def selectAllCB(self, attr, event_callback):
-        event = event_callback.getEvent()
-        if (event.getKey() == ord(InteractionSeparator.ctrl_keys["select_all"])):
-            if event.getState() == event.DOWN:
-                if self.selected_objects:
-                    for o in self.selected_objects:
-                        o.unselect()
-                    self.selected_objects = []
-                else:
-                    for obj in self.dynamic_objects:
-                        if obj.dynamic:
-                            self.selected_objects.append(obj)
-                self.colorSelected()
-                self.selectionChanged()
+    # def selectAllCB(self, attr, event_callback):
+    #     event = event_callback.getEvent()
+    #     if (event.getKey() == ord(InteractionSeparator.ctrl_keys["select_all"])):
+    #         if event.getState() == event.DOWN:
+    #             if self.selected_objects:
+    #                 for o in self.selected_objects:
+    #                     o.unselect()
+    #                 self.selected_objects = []
+    #             else:
+    #                 for obj in self.dynamic_objects:
+    #                     if obj.dynamic:
+    #                         self.selected_objects.append(obj)
+    #             self.colorSelected()
+    #             self.selectionChanged()
 
 
 #------------------------INTERACTION------------------------#
@@ -407,112 +584,103 @@ class InteractionSeparator(coin.SoSeparator):
         return getPointOnScreen(self.render_manager, pos)
     
 
-    def constrained_vector(self, vector):
-        if self._direction is None:
-            return vector
-        if self._direction == InteractionSeparator.ctrl_keys["axis_x"]:
-            return [vector[0], 0, 0]
-        elif self._direction == InteractionSeparator.ctrl_keys["axis_y"]:
-            return [0, vector[1], 0]
-        elif self._direction == InteractionSeparator.ctrl_keys["axis_z"]:
-            return [0, 0, vector[2]]
 
-    def grabCB(self, attr, event_callback):
-        # press grab key to move an entity
-        event = event_callback.getEvent()
-        # get all drag objects, every selected object can add some drag objects
-        # but the eventhandler is not allowed to call the drag twice on an object
-        #if event.getKey() == ord(InteractionSeparator.ctrl_keys["grab"]):
-        if (event.getState() == coin.SoMouseButtonEvent.DOWN and
-                event.getButton() == event.BUTTON1):
-            pos = event.getPosition()
-            obj = self.sendRay(pos)
-            if obj:
-                #if not obj in self.selected_objects:
-                    #self.selectObject(obj, event.wasCtrlDown())
-                self.drag_objects = set()
-                for i in self.selected_objects:
-                    for j in i.drag_objects:
-                        self.drag_objects.add(j)
-                # check if something is selected
-                if self.drag_objects:
-                    # first delete the selection_cb, and higlight_cb
-                    self.unregister()
-                    # now add a callback that calls the dragfunction of the selected entities
-                    self.start_pos = self.cursor_pos(event)
-                    self.events.grabEvents()
-                    self._dragCB = self.events.addEventCallback(
-                        coin.SoEvent.getClassTypeId(), self.dragCB)
-                    for obj in self.drag_objects:
-                        obj.drag_start()
-                    for foo in self.on_drag_start:
-                        foo()
+    # def grabCB(self, attr, event_callback):
+    #     # press grab key to move an entity
+    #     event = event_callback.getEvent()
+    #     # get all drag objects, every selected object can add some drag objects
+    #     # but the eventhandler is not allowed to call the drag twice on an object
+    #     #if event.getKey() == ord(InteractionSeparator.ctrl_keys["grab"]):
+    #     if (event.getState() == coin.SoMouseButtonEvent.DOWN and
+    #             event.getButton() == event.BUTTON1):
+    #         pos = event.getPosition()
+    #         obj = self.sendRay(pos)
+    #         if obj:
+    #             #if not obj in self.selected_objects:
+    #                 #self.selectObject(obj, event.wasCtrlDown())
+    #             self.drag_objects = set()
+    #             for i in self.selected_objects:
+    #                 for j in i.drag_objects:
+    #                     self.drag_objects.add(j)
+    #             # check if something is selected
+    #             if self.drag_objects:
+    #                 # first delete the selection_cb, and higlight_cb
+    #                 self.unregister()
+    #                 # now add a callback that calls the dragfunction of the selected entities
+    #                 self.start_pos = self.cursor_pos(event)
+    #                 self.events.grabEvents()
+    #                 self._dragCB = self.events.addEventCallback(
+    #                     coin.SoEvent.getClassTypeId(), self.dragCB)
+    #                 for obj in self.drag_objects:
+    #                     obj.drag_start()
+    #                 for foo in self.on_drag_start:
+    #                     foo()
 
-    def dragCB(self, attr, event_callback, force=False):
-        event = event_callback.getEvent()
-        b = ""
-        s = ""
-        if type(event) == coin.SoMouseButtonEvent:
-            if event.getButton() == coin.SoMouseButtonEvent.BUTTON1:
-                b = "mb1"
-            elif event.getButton() == coin.SoMouseButtonEvent.BUTTON2:
-                b = "mb2"
-            if event.getState() == coin.SoMouseButtonEvent.UP:
-                s = "up"
-            elif event.getState() == coin.SoMouseButtonEvent.DOWN:
-                s = "down"
-            # import FreeCAD
-            # FreeCAD.Console.PrintMessage("{} {}\n".format(b,s))
-        if ((type(event) == coin.SoMouseButtonEvent and
-                event.getState() == coin.SoMouseButtonEvent.UP
-                and event.getButton() == coin.SoMouseButtonEvent.BUTTON1) or 
-                force):
-            self.register()
-            self.events.releaseEvents()
-            if self._dragCB:
-                self.events.removeEventCallback(
-                    coin.SoEvent.getClassTypeId(), self._dragCB)
-                self._direction = None
-                self._dragCB = None
-            self.start_pos = None
-            for obj in self.drag_objects:
-                obj.drag_release()
-            for foo in self.on_drag_release:
-                foo()
-            self.drag_objects = []
-        elif (type(event) == coin.SoKeyboardEvent and
-                event.getState() == coin.SoMouseButtonEvent.DOWN):
-            if event.getKey() == InteractionSeparator.ctrl_keys["abort_grab"]:     # esc
-                for obj in self.drag_objects:
-                    obj.drag([0, 0, 0], 1)  # set back to zero
-                self.dragCB(attr, event_callback, force=True)
-                return
-            try:
-                key = chr(event.getKey())
-            except ValueError:
-                # there is no character for this value
-                key = "_"
-            if key in [InteractionSeparator.ctrl_keys["axis_x"],
-                       InteractionSeparator.ctrl_keys["axis_y"],
-                       InteractionSeparator.ctrl_keys["axis_z"]] and key != self._direction:
-                self._direction = key
-            else:
-                self._direction = None
-            diff = self.cursor_pos(event) - self.start_pos
-            diff = self.constrained_vector(diff)
-            for obj in self.drag_objects:
-                obj.drag(diff, 1)
-            for foo in self.on_drag:
-                foo()
+    # def dragCB(self, attr, event_callback, force=False):
+    #     event = event_callback.getEvent()
+    #     b = ""
+    #     s = ""
+    #     if type(event) == coin.SoMouseButtonEvent:
+    #         if event.getButton() == coin.SoMouseButtonEvent.BUTTON1:
+    #             b = "mb1"
+    #         elif event.getButton() == coin.SoMouseButtonEvent.BUTTON2:
+    #             b = "mb2"
+    #         if event.getState() == coin.SoMouseButtonEvent.UP:
+    #             s = "up"
+    #         elif event.getState() == coin.SoMouseButtonEvent.DOWN:
+    #             s = "down"
+    #         # import FreeCAD
+    #         # FreeCAD.Console.PrintMessage("{} {}\n".format(b,s))
+    #     if ((type(event) == coin.SoMouseButtonEvent and
+    #             event.getState() == coin.SoMouseButtonEvent.UP
+    #             and event.getButton() == coin.SoMouseButtonEvent.BUTTON1) or 
+    #             force):
+    #         self.register()
+    #         self.events.releaseEvents()
+    #         if self._dragCB:
+    #             self.events.removeEventCallback(
+    #                 coin.SoEvent.getClassTypeId(), self._dragCB)
+    #             self._direction = None
+    #             self._dragCB = None
+    #         self.start_pos = None
+    #         for obj in self.drag_objects:
+    #             obj.drag_release()
+    #         for foo in self.on_drag_release:
+    #             foo()
+    #         self.drag_objects = []
+    #     elif (type(event) == coin.SoKeyboardEvent and
+    #             event.getState() == coin.SoMouseButtonEvent.DOWN):
+    #         if event.getKey() == InteractionSeparator.ctrl_keys["abort_grab"]:     # esc
+    #             for obj in self.drag_objects:
+    #                 obj.drag([0, 0, 0], 1)  # set back to zero
+    #             self.dragCB(attr, event_callback, force=True)
+    #             return
+    #         try:
+    #             key = chr(event.getKey())
+    #         except ValueError:
+    #             # there is no character for this value
+    #             key = "_"
+    #         if key in [InteractionSeparator.ctrl_keys["axis_x"],
+    #                    InteractionSeparator.ctrl_keys["axis_y"],
+    #                    InteractionSeparator.ctrl_keys["axis_z"]] and key != self._direction:
+    #             self._direction = key
+    #         else:
+    #             self._direction = None
+    #         diff = self.cursor_pos(event) - self.start_pos
+    #         diff = self.constrained_vector(diff)
+    #         for obj in self.drag_objects:
+    #             obj.drag(diff, 1)
+    #         for foo in self.on_drag:
+    #             foo()
 
-        elif type(event) == coin.SoLocation2Event:
-            fact = 0.1 if event.wasShiftDown() else 1.
-            diff = self.cursor_pos(event) - self.start_pos
-            diff = self.constrained_vector(diff)
-            for obj in self.drag_objects:
-                obj.drag(diff, fact)
-            for foo in self.on_drag:
-                foo()
+    #     elif type(event) == coin.SoLocation2Event:
+    #         fact = 0.1 if event.wasShiftDown() else 1.
+    #         diff = self.cursor_pos(event) - self.start_pos
+    #         diff = self.constrained_vector(diff)
+    #         for obj in self.drag_objects:
+    #             obj.drag(diff, fact)
+    #         for foo in self.on_drag:
+    #             foo()
 
     def deleteCB(self, attr, event_callback):
         event = event_callback.getEvent()

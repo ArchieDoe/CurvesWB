@@ -425,7 +425,7 @@ class BlendCurveVP:
 
             self.m1 = manipulators.EdgeSnapAndTangent(self.bc.point1.point, self.bc.point1.edge)
             self.m1.set_color("cyan")
-            self.m1.marker.markerIndex = coin.SoMarkerSet.CIRCLE_LINE_9_9
+            self.m1.marker.markerIndex = coin.SoMarkerSet.CIRCLE_LINE_5_5
             pts.append(self.m1)
             self.c1 = manipulators.CycleText(self.m1)
             self.c1.text_list = ["C0", "G1", "G2", "G3", "G4"]
@@ -443,7 +443,7 @@ class BlendCurveVP:
 
             self.m2 = manipulators.EdgeSnapAndTangent(self.bc.point2.point, self.bc.point2.edge)
             self.m2.set_color("red")
-            self.m2.marker.markerIndex = coin.SoMarkerSet.CIRCLE_LINE_9_9
+            self.m2.marker.markerIndex = coin.SoMarkerSet.CIRCLE_LINE_5_5
             pts.append(self.m2)
             self.c2 = manipulators.CycleText(self.m2)
             self.c2.text_list = ["C0", "G1", "G2", "G3", "G4"]
