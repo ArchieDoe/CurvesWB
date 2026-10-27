@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
 from pivy import coin
+
 #from pivy.utils import getPointOnScreen
 
 def getPointOnScreen(render_manager, screen_pos, normal="camera", point=None):
@@ -152,15 +153,18 @@ class Object3D(coin.SoSeparator):
 class Marker(Object3D):
     def __init__(self, points, dynamic=False):
         super(Marker, self).__init__(points, dynamic)
-        self.marker = coin.SoMarkerSet()
-        self.marker.markerIndex = coin.SoMarkerSet.CIRCLE_FILLED_9_9
-        self.addChild(self.marker)
+        self.drawstyle = coin.SoDrawStyle()
+        self.drawstyle.pointSize = 30.0
+        self.point = coin.SoPointSet()
+        self.addChild(self.drawstyle)
+        self.addChild(self.point)
 
 
 class Line(Object3D):
     def __init__(self, points, dynamic=False):
         super(Line, self).__init__(points, dynamic)
         self.drawstyle = coin.SoDrawStyle()
+        self.drawstyle.lineWidth = 5.0
         self.line = coin.SoLineSet()
         self.addChild(self.drawstyle)
         self.addChild(self.line)
@@ -209,7 +213,7 @@ class Arrow(Line):
 class InteractionSeparator(coin.SoSeparator):
     pick_radius = 20
     ctrl_keys = {"grab": "g",
-                 "abort_grab": u"\uff1b",
+                 "abort_grab": "h",
                  "select_all": "a",
                  "delete": u"\uffff",
                  "axis_x": "x",
@@ -219,9 +223,11 @@ class InteractionSeparator(coin.SoSeparator):
     def __init__(self, render_manager):
         super(InteractionSeparator, self).__init__()
         self.render_manager = render_manager
-        self.objects = coin.SoSeparator()
+        self.lines_objects = coin.SoSeparator()  # Render lines first
+        self.marker_objects = coin.SoSeparator()  # Render markers on top
         self.dynamic_objects = []
         self.static_objects = []
+        self.marker_objects_list = []  # Track markers separately
         self.over_object = None
         self.selected_objects = []
         self.drag_objects = []
@@ -233,7 +239,7 @@ class InteractionSeparator(coin.SoSeparator):
         self._direction = None
 
         self.events = coin.SoEventCallback()
-        self += self.events, self.objects
+        self += self.events, self.lines_objects, self.marker_objects
 
     def register(self):
         self._highlightCB = self.events.addEventCallback(
@@ -262,7 +268,13 @@ class InteractionSeparator(coin.SoSeparator):
 
     def addChild(self, child):
         if hasattr(child, "dynamic"):
-            self.objects.addChild(child)
+            # Add markers to marker_objects (rendered on top, picked first)
+            if isinstance(child, Marker):
+                self.marker_objects.addChild(child)
+                self.marker_objects_list.append(child)
+            else:
+                # Add other objects to lines_objects
+                self.lines_objects.addChild(child)
             if child.dynamic:
                 self.dynamic_objects.append(child)
             else:
@@ -300,19 +312,23 @@ class InteractionSeparator(coin.SoSeparator):
         return self.objByID(picked_point)
 
     def objByID(self, picked_point):
+        # First pass: check only markers (vertices) - highest priority
         for point in picked_point:
             path = point.getPath()
             length = path.getLength()
-            point = path.getNode(length - 2)
-            for o in self.dynamic_objects:
-                if point == o:
+            node = path.getNode(length - 2)
+            for o in self.marker_objects_list:
+                if node == o:
                     return(o)
-            # Code below was not working with python 2.7 (pb with getNodeId ?)
-            #point = list(filter(
-                #lambda ctrl: ctrl.getNodeId() == point.getNodeId(),
-                #self.dynamic_objects))
-            #if point != []:
-                #return point[0]
+        
+        # Second pass: check all other objects
+        for point in picked_point:
+            path = point.getPath()
+            length = path.getLength()
+            node = path.getNode(length - 2)
+            for o in self.dynamic_objects:
+                if node == o:
+                    return(o)
         return None
         
 
@@ -348,7 +364,7 @@ class InteractionSeparator(coin.SoSeparator):
                         o.unselect()
                     self.selected_objects = []
                 else:
-                    for obj in self.objects:
+                    for obj in self.dynamic_objects:
                         if obj.dynamic:
                             self.selected_objects.append(obj)
                 self.ColorSelected()
@@ -424,6 +440,7 @@ class InteractionSeparator(coin.SoSeparator):
                     self.unregister()
                     # now add a callback that calls the dragfunction of the selected entities
                     self.start_pos = self.cursor_pos(event)
+                    self.events.grabEvents()
                     self._dragCB = self.events.addEventCallback(
                         coin.SoEvent.getClassTypeId(), self.dragCB)
                     for obj in self.drag_objects:
@@ -451,6 +468,7 @@ class InteractionSeparator(coin.SoSeparator):
                 and event.getButton() == coin.SoMouseButtonEvent.BUTTON1) or 
                 force):
             self.register()
+            self.events.releaseEvents()
             if self._dragCB:
                 self.events.removeEventCallback(
                     coin.SoEvent.getClassTypeId(), self._dragCB)
@@ -520,8 +538,13 @@ class InteractionSeparator(coin.SoSeparator):
                 self.dynamic_objects.remove(i)
             else:
                 self.static_objects.remove(i)
-            import sys
-            self.objects.removeChild(i)
+            # Remove from appropriate separator
+            if isinstance(i, Marker):
+                self.marker_objects.removeChild(i)
+                if i in self.marker_objects_list:
+                    self.marker_objects_list.remove(i)
+            else:
+                self.lines_objects.removeChild(i)
             del(i)
         self.selectionChanged()
 
@@ -530,6 +553,7 @@ class InteractionSeparator(coin.SoSeparator):
             i.delete()
         self.dynamic_objects = []
         self.static_objects = []
+        self.marker_objects_list = []
         self.selected_objects = []
         self.over_object = None
         super(InteractionSeparator, self).removeAllChildren()

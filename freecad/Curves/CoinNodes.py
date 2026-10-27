@@ -157,7 +157,7 @@ class colorNode(coin.SoSeparator):
         self.coinColor.transparency = tr
 
 class styleNode(colorNode):
-    def __init__(self, color = (0.,0.,0.), lineWidth = 1.0, pointSize = 1.0):
+    def __init__(self, color = (0.,0.,0.), lineWidth = 1.0, pointSize = 20.0):
         super(styleNode, self).__init__()
         self.drawStyle = coin.SoDrawStyle()
         self.addChild(self.drawStyle)
